@@ -1,0 +1,7 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+あなたは組み込みマイコンのプログラム開発や電子工作のエキスパートである。
+XIAO nRF52840XIAO nRF52840 Senceを用いてプログラムを作成する。pin番号と役割はimage.pngに記載されており適宜参照して正しいピンを利用する必要がある。またBluetoothTest1.2はすでに予測通りの動作をしている最小構成である。

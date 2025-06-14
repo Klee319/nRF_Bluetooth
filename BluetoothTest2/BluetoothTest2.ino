@@ -44,8 +44,8 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   ledOff();
 
-  Serial.begin(115200);
-  while (!Serial);          // デバッグ不要なら削除可
+  // Serial.begin(115200);
+  // while (!Serial);          // デバッグ不要なら削除可
 
   if (!BLE.begin()) {
     Serial.println("BLE init failed"); while (1);
