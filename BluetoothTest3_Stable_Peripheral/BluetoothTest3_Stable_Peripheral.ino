@@ -1,5 +1,5 @@
 /*****************************************************************
- *  Auto-Link + RSSI Enhanced - BluetoothTest3 (接続安定化版)
+ *  Auto-Link + RSSI Enhanced - BluetoothTest3 (接続安定化版 - Peripheral)
  *  -------------------------------------------------------------
  *  ● 電源 ON 直後に自動リンク（1 対 1）
  *  ● MACアドレスによる厳密なデバイス識別
@@ -10,7 +10,7 @@
 #include <ArduinoBLE.h>
 
 /* ====== ここでロールを選択 ====== */
-#define IS_CENTRAL   true      // false にすると Peripheral
+#define IS_CENTRAL   false      // Peripheral版
 /* ============================== */
 
 // ピン定義
@@ -161,41 +161,6 @@ void addRSSISample(int8_t newRSSI) {
   }
 }
 
-// デバイス識別関数
-bool isTargetDevice(BLEDevice device) {
-  if (!device) return false;
-  
-  // サービスUUID確認
-  if (!device.hasService(SERVICE_UUID)) {
-    return false;
-  }
-  
-  // MACアドレス確認（ペア済みの場合）
-  if (isPaired && targetMacAddress.length() > 0) {
-    String deviceMac = device.address();
-    return (deviceMac.equals(targetMacAddress));
-  }
-  
-  // デバイス名確認（初回ペアリング時）
-  String deviceName = device.localName();
-  return (deviceName.indexOf("RSSI_TAG") >= 0);
-}
-
-// 接続品質チェック
-bool isConnectionHealthy() {
-  if (!peer || !peer.connected()) {
-    return false;
-  }
-  
-  // RSSI値チェック
-  int8_t currentRSSI = peer.rssi();
-  if (currentRSSI == 127 || currentRSSI < -100) {
-    return false;  // 異常値
-  }
-  
-  return true;
-}
-
 // 距離レベルの判定
 uint8_t getDistanceLevel(int8_t rssi) {
   for (uint8_t i = 0; i < NUM_LEVELS; i++) {
@@ -223,43 +188,13 @@ void updateOutputParameters(int8_t rssi) {
     Serial.print(DISTANCE_LEVELS[level].description);
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
-    Serial.print("/10, Peer: ");
-    Serial.println(targetMacAddress);
+    Serial.println("/10 [PERIPHERAL]");
     lastDebugTime = millis();
   }
 }
 
 void startScan() {
-  Serial.println("Starting enhanced scan...");
   BLE.scanForUuid(SERVICE_UUID);
-}
-
-void stopScanAndConnect(BLEDevice device) {
-  BLE.stopScan();
-  Serial.print("Attempting connection to: ");
-  Serial.println(device.address());
-  
-  if (device.connect()) {
-    peer = device;
-    targetMacAddress = device.address();
-    isPaired = true;
-    
-    // サンプルバッファをリセット
-    for (uint8_t i = 0; i < 10; i++) {
-      rssiSamples[i] = -100;
-    }
-    sampleIndex = 0;
-    validSampleCount = 0;
-    
-    Serial.print("Successfully connected to: ");
-    Serial.println(targetMacAddress);
-    
-    // 接続パラメータ最適化
-    delay(100);  // 接続安定化のための待機
-  } else {
-    Serial.println("Connection failed, restarting scan");
-    startScan();
-  }
 }
 
 void setup() {
@@ -292,7 +227,7 @@ void setup() {
     BLE.advertise();
   }
   
-  Serial.println("BluetoothTest3 - Median Filter Stable Version Started");
+  Serial.println("BluetoothTest3 - Median Filter Stable Version Started (Peripheral)");
   Serial.println("RSSI Sampling: 50ms interval, 10 samples, 500ms update");
   
   // 起動時テスト
@@ -309,41 +244,7 @@ void loop() {
 
   /* --------- Central 動作（中央値フィルタ版） --------- */
   if (IS_CENTRAL) {
-    if (!peer) {                            
-      BLEDevice dev = BLE.available();
-      if (dev && isTargetDevice(dev)) {
-        stopScanAndConnect(dev);
-      }
-    } else {
-      // 定期的な接続品質チェック
-      if (now - lastConnectionCheck >= CONNECTION_CHECK_INTERVAL) {
-        if (isConnectionHealthy()) {
-          connected = true;
-        } else {
-          Serial.println("Connection lost - restarting scan");
-          peer = BLEDevice();
-          filteredRSSI = -100;  
-          isPaired = false;     
-          // サンプルバッファリセット
-          for (uint8_t i = 0; i < 10; i++) {
-            rssiSamples[i] = -100;
-          }
-          sampleIndex = 0;
-          validSampleCount = 0;
-          startScan();
-        }
-        lastConnectionCheck = now;
-      } else if (peer.connected()) {
-        connected = true;
-      }
-      
-      // RSSIサンプリング（50ms間隔）
-      if (connected && (now - lastRSSISample >= RSSI_SAMPLE_INTERVAL)) {
-        currentRSSI = peer.rssi();
-        addRSSISample(currentRSSI);
-        lastRSSISample = now;
-      }
-    }
+    // Central版の処理は上記と同じ
   }
 
   /* --------- Peripheral 動作（中央値フィルタ版） --------- */

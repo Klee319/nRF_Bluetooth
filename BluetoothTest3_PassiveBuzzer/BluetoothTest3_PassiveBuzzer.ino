@@ -11,7 +11,7 @@
 #include <ArduinoBLE.h>
 
 /* ====== ここでロールを選択 ====== */
-#define IS_CENTRAL   false      // false にすると Peripheral
+#define IS_CENTRAL   true      // false にすると Peripheral
 /* ============================== */
 
 // ピン定義
@@ -154,8 +154,8 @@ void setup() {
   ledOff();
   buzzerOff();
 
-  // Serial.begin(115200);
-  // while (!Serial);          // デバッグ用（本番では削除可）
+  Serial.begin(115200);
+  while (!Serial);          // デバッグ用（本番では削除可）
 
   if (!BLE.begin()) {
     Serial.println("BLE init failed"); 
@@ -250,4 +250,4 @@ void loop() {
   }
 
   BLE.poll();
-}
+} 
