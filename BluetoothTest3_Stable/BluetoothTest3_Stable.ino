@@ -1,9 +1,8 @@
 /*****************************************************************
- *  Auto-Link + RSSI Enhanced - BluetoothTest3 (接続安定化版)
+ *  Auto-Link + RSSI Enhanced - BluetoothTest3 (接続修正版)
  *  -------------------------------------------------------------
  *  ● 電源 ON 直後に自動リンク（1 対 1）
- *  ● MACアドレスによる厳密なデバイス識別
- *  ● 接続安定性の大幅向上
+ *  ● シンプルで確実な接続方式
  *  ● 中央値フィルタによる強化されたRSSI平滑化
  *  ● 電波干渉に対する耐性向上（10サンプル中央値）
  *****************************************************************/
@@ -27,13 +26,10 @@ BLEByteCharacteristic dummyChar("19B10001-E8F2-537E-4F6C-D104768A1214",
 
 /* ----- Central 用 ----- */
 BLEDevice peer;
-String targetMacAddress = "";                 // ペア相手のMACアドレス
-bool isPaired = false;                        // ペアリング状態
 
 /* ----- 出力制御用変数 ----- */
 uint32_t lastToggle = 0;
 uint32_t lastBuzzer = 0;
-uint32_t lastConnectionCheck = 0;             // 接続チェック用
 uint32_t lastRSSISample = 0;                  // RSSIサンプリング用
 uint32_t lastOutputUpdate = 0;                // 出力更新用
 uint16_t blinkMs    = 1000;           
@@ -51,7 +47,6 @@ uint8_t  sampleIndex = 0;
 uint8_t  validSampleCount = 0;
 constexpr uint32_t RSSI_SAMPLE_INTERVAL = 50;    // RSSIサンプリング間隔(ms)
 constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 500;  // 出力更新間隔(ms) 
-constexpr uint32_t CONNECTION_CHECK_INTERVAL = 1000; // 接続チェック間隔(ms)
 
 /* ----- 距離段階定義 ----- */
 struct DistanceLevel {
@@ -161,41 +156,6 @@ void addRSSISample(int8_t newRSSI) {
   }
 }
 
-// デバイス識別関数
-bool isTargetDevice(BLEDevice device) {
-  if (!device) return false;
-  
-  // サービスUUID確認
-  if (!device.hasService(SERVICE_UUID)) {
-    return false;
-  }
-  
-  // MACアドレス確認（ペア済みの場合）
-  if (isPaired && targetMacAddress.length() > 0) {
-    String deviceMac = device.address();
-    return (deviceMac.equals(targetMacAddress));
-  }
-  
-  // デバイス名確認（初回ペアリング時）
-  String deviceName = device.localName();
-  return (deviceName.indexOf("RSSI_TAG") >= 0);
-}
-
-// 接続品質チェック
-bool isConnectionHealthy() {
-  if (!peer || !peer.connected()) {
-    return false;
-  }
-  
-  // RSSI値チェック
-  int8_t currentRSSI = peer.rssi();
-  if (currentRSSI == 127 || currentRSSI < -100) {
-    return false;  // 異常値
-  }
-  
-  return true;
-}
-
 // 距離レベルの判定
 uint8_t getDistanceLevel(int8_t rssi) {
   for (uint8_t i = 0; i < NUM_LEVELS; i++) {
@@ -223,43 +183,13 @@ void updateOutputParameters(int8_t rssi) {
     Serial.print(DISTANCE_LEVELS[level].description);
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
-    Serial.print("/10, Peer: ");
-    Serial.println(targetMacAddress);
+    Serial.println("/10");
     lastDebugTime = millis();
   }
 }
 
 void startScan() {
-  Serial.println("Starting enhanced scan...");
   BLE.scanForUuid(SERVICE_UUID);
-}
-
-void stopScanAndConnect(BLEDevice device) {
-  BLE.stopScan();
-  Serial.print("Attempting connection to: ");
-  Serial.println(device.address());
-  
-  if (device.connect()) {
-    peer = device;
-    targetMacAddress = device.address();
-    isPaired = true;
-    
-    // サンプルバッファをリセット
-    for (uint8_t i = 0; i < 10; i++) {
-      rssiSamples[i] = -100;
-    }
-    sampleIndex = 0;
-    validSampleCount = 0;
-    
-    Serial.print("Successfully connected to: ");
-    Serial.println(targetMacAddress);
-    
-    // 接続パラメータ最適化
-    delay(100);  // 接続安定化のための待機
-  } else {
-    Serial.println("Connection failed, restarting scan");
-    startScan();
-  }
 }
 
 void setup() {
@@ -269,16 +199,12 @@ void setup() {
   buzzerOff();
 
   Serial.begin(115200);
-  while (!Serial);          
+  // Serial待機を削除してすぐに開始
 
   if (!BLE.begin()) {
     Serial.println("BLE init failed"); 
     while (1);
   }
-
-  // Bluetooth設定の最適化
-  BLE.setConnectionInterval(16, 32);      
-  BLE.setTimeout(8000);                   // より長いタイムアウト
 
   if (IS_CENTRAL) {
     Serial.println("CENTRAL: Median Filter Enhanced Version");
@@ -288,12 +214,11 @@ void setup() {
     ledService.addCharacteristic(dummyChar);
     BLE.setAdvertisedService(ledService);
     BLE.addService(ledService);
-    BLE.setLocalName("RSSI_TAG_V3_MEDIAN");  
+    BLE.setLocalName("RSSI_TAG");  // シンプルな名前に戻す
     BLE.advertise();
   }
   
-  Serial.println("BluetoothTest3 - Median Filter Stable Version Started");
-  Serial.println("RSSI Sampling: 50ms interval, 10 samples, 500ms update");
+  Serial.println("BluetoothTest3 - Connection Fixed Version Started");
   
   // 起動時テスト
   Serial.println("System test...");
@@ -307,46 +232,48 @@ void loop() {
   int8_t currentRSSI = -100;
   uint32_t now = millis();
 
-  /* --------- Central 動作（中央値フィルタ版） --------- */
+  /* --------- Central 動作（簡素化版） --------- */
   if (IS_CENTRAL) {
     if (!peer) {                            
       BLEDevice dev = BLE.available();
-      if (dev && isTargetDevice(dev)) {
-        stopScanAndConnect(dev);
-      }
-    } else {
-      // 定期的な接続品質チェック
-      if (now - lastConnectionCheck >= CONNECTION_CHECK_INTERVAL) {
-        if (isConnectionHealthy()) {
-          connected = true;
-        } else {
-          Serial.println("Connection lost - restarting scan");
-          peer = BLEDevice();
-          filteredRSSI = -100;  
-          isPaired = false;     
-          // サンプルバッファリセット
-          for (uint8_t i = 0; i < 10; i++) {
-            rssiSamples[i] = -100;
-          }
-          sampleIndex = 0;
-          validSampleCount = 0;
-          startScan();
+      if (dev && dev.connect()) {
+        peer = dev;
+        BLE.stopScan();
+        Serial.println("Connected!");
+        
+        // サンプルバッファをリセット
+        for (uint8_t i = 0; i < 10; i++) {
+          rssiSamples[i] = -100;
         }
-        lastConnectionCheck = now;
-      } else if (peer.connected()) {
-        connected = true;
+        sampleIndex = 0;
+        validSampleCount = 0;
       }
+    }
+    
+    if (peer && peer.connected()) {
+      connected = true;
       
       // RSSIサンプリング（50ms間隔）
-      if (connected && (now - lastRSSISample >= RSSI_SAMPLE_INTERVAL)) {
+      if (now - lastRSSISample >= RSSI_SAMPLE_INTERVAL) {
         currentRSSI = peer.rssi();
         addRSSISample(currentRSSI);
         lastRSSISample = now;
       }
+    } else if (peer) {                      // 切断
+      Serial.println("Disconnected");
+      peer = BLEDevice();
+      filteredRSSI = -100;  
+      // サンプルバッファリセット
+      for (uint8_t i = 0; i < 10; i++) {
+        rssiSamples[i] = -100;
+      }
+      sampleIndex = 0;
+      validSampleCount = 0;
+      startScan();
     }
   }
 
-  /* --------- Peripheral 動作（中央値フィルタ版） --------- */
+  /* --------- Peripheral 動作（簡素化版） --------- */
   else {
     if (BLE.connected()) {
       connected = true;
@@ -356,19 +283,6 @@ void loop() {
         currentRSSI = BLE.rssi();
         addRSSISample(currentRSSI);
         lastRSSISample = now;
-      }
-    } else {
-      // 接続が失われた場合
-      if (isPaired) {
-        Serial.println("Connection lost [PERIPHERAL]");
-        isPaired = false;
-        filteredRSSI = -100;
-        // サンプルバッファリセット
-        for (uint8_t i = 0; i < 10; i++) {
-          rssiSamples[i] = -100;
-        }
-        sampleIndex = 0;
-        validSampleCount = 0;
       }
     }
   }
