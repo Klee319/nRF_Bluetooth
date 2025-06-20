@@ -39,14 +39,16 @@ uint8_t  buzzerVolume = 0;
 bool     ledState   = false;
 bool     buzzerState = false;
 
-/* ----- RSSI処理（中央値フィルタ版） ----- */
+/* ----- RSSI処理（EMA + 標準偏差50近似フィルタ版） ----- */
 int8_t   lastRSSI   = -100;
 int8_t   filteredRSSI = -100;         
-int8_t   rssiSamples[20] = {-100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100};  // 20サンプル
+float    emaRSSI = -100.0f;           // EMA用の浮動小数点値
+int8_t   rssiSamples[40] = {-100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100};  // 40サンプル
 uint8_t  sampleIndex = 0;
 uint8_t  validSampleCount = 0;
-constexpr uint32_t RSSI_SAMPLE_INTERVAL = 50;    // RSSIサンプリング間隔(ms)
-constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 500;  // 出力更新間隔(ms)
+constexpr uint32_t RSSI_SAMPLE_INTERVAL = 25;    // RSSIサンプリング間隔(ms) - 25msに変更
+constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 800;  // 出力更新間隔(ms)
+constexpr float EMA_ALPHA = 0.1f;                 // EMA平滑化係数
 
 /* ----- 距離段階定義 ----- */
 struct DistanceLevel {
@@ -110,15 +112,137 @@ void sortRSSISamples(int8_t* arr, uint8_t size) {
   }
 }
 
-// 中央値フィルタによるRSSI処理（中央10個の平均版）
-int8_t processRSSIWithMedianFilter() {
+// 標準偏差50に最も近い個別値10個を選択
+float calculateStdDev50BasedAverage(int8_t* sortedSamples, uint8_t count) {
+  if (count < 10) {
+    // サンプル数が10未満の場合は通常の平均
+    int16_t sum = 0;
+    for (uint8_t i = 0; i < count; i++) {
+      sum += sortedSamples[i];
+    }
+    return (float)sum / count;
+  }
+  
+  float targetStdDev = 50.0f;
+  
+  // 各値について「その値を含む仮想的な標準偏差50グループ」との近さを評価
+  float valueScores[40];
+  for (uint8_t i = 0; i < count; i++) {
+    // この値が標準偏差50のグループにどれだけ適しているかをスコア化
+    // 方法1: 値そのものの範囲から推定（簡易版）
+    // RSSI値-50～-90の範囲で、標準偏差50に適した分布を想定
+    float value = (float)sortedSamples[i];
+    
+    // 理想的な標準偏差50の分布における適合度を計算
+    // 平均を-70dBmと仮定し、標準偏差50での正規分布適合度を評価
+    float expectedMean = -70.0f;
+    float deviation = abs(value - expectedMean);
+    
+    // 標準偏差50の正規分布において、この偏差がどれだけ「適切」かを評価
+    // 標準偏差50なら、約68%が±50以内、95%が±100以内
+    float normalizedDeviation = deviation / targetStdDev;
+    
+    // スコア計算：偏差が50に近いほど良いスコア（小さい値ほど良い）
+    if (normalizedDeviation <= 1.0f) {
+      // ±1σ以内なら良いスコア
+      valueScores[i] = normalizedDeviation;
+    } else if (normalizedDeviation <= 2.0f) {
+      // ±2σ以内なら中程度のスコア
+      valueScores[i] = 1.0f + (normalizedDeviation - 1.0f) * 2.0f;
+    } else {
+      // ±2σ超なら悪いスコア
+      valueScores[i] = 3.0f + (normalizedDeviation - 2.0f) * 5.0f;
+    }
+  }
+  
+  // より精密な方法：実際に各値を中心とした近傍での標準偏差を計算
+  for (uint8_t i = 0; i < count; i++) {
+    float centerValue = (float)sortedSamples[i];
+    
+    // この値を中心とした近傍値群の標準偏差を計算
+    // 近傍の定義：この値から±一定範囲内の値
+    float nearbySum = 0;
+    uint8_t nearbyCount = 0;
+    
+    for (uint8_t j = 0; j < count; j++) {
+      float otherValue = (float)sortedSamples[j];
+      if (abs(otherValue - centerValue) <= targetStdDev) {
+        nearbySum += otherValue;
+        nearbyCount++;
+      }
+    }
+    
+    if (nearbyCount >= 3) {
+      float nearbyMean = nearbySum / nearbyCount;
+      
+      // 近傍群の標準偏差を計算
+      float variance = 0;
+      for (uint8_t j = 0; j < count; j++) {
+        float otherValue = (float)sortedSamples[j];
+        if (abs(otherValue - centerValue) <= targetStdDev) {
+          float diff = otherValue - nearbyMean;
+          variance += diff * diff;
+        }
+      }
+      float actualStdDev = sqrt(variance / nearbyCount);
+      
+      // 目標標準偏差との差をスコアとして使用
+      float stdDevScore = abs(actualStdDev - targetStdDev);
+      
+      // より良いスコアなら更新
+      if (stdDevScore < valueScores[i]) {
+        valueScores[i] = stdDevScore;
+      }
+    }
+  }
+  
+  // 最良スコアの10個を選択（挿入ソートで上位10個を特定）
+  uint8_t bestIndices[10];
+  float bestScores[10];
+  
+  // 初期化
+  for (uint8_t i = 0; i < 10; i++) {
+    bestIndices[i] = 0;
+    bestScores[i] = 999999.0f;
+  }
+  
+  // 全値について評価し、上位10個を保持
+  for (uint8_t i = 0; i < count; i++) {
+    float currentScore = valueScores[i];
+    
+    // 現在のスコアが上位10個に入るかチェック
+    for (uint8_t j = 0; j < 10; j++) {
+      if (currentScore < bestScores[j]) {
+        // 挿入位置が見つかった場合、後ろにシフト
+        for (uint8_t k = 9; k > j; k--) {
+          bestScores[k] = bestScores[k-1];
+          bestIndices[k] = bestIndices[k-1];
+        }
+        bestScores[j] = currentScore;
+        bestIndices[j] = i;
+        break;
+      }
+    }
+  }
+  
+  // 選択された10個の平均を計算
+  float sum = 0;
+  for (uint8_t i = 0; i < 10; i++) {
+    sum += sortedSamples[bestIndices[i]];
+  }
+  
+  return sum / 10.0f;
+}
+
+// EMA + 標準偏差50近似フィルタによるRSSI処理
+int8_t processRSSIWithEMAAndStdDev50() {
   if (validSampleCount == 0) return -100;
   
   // 有効なサンプルを一時配列にコピー
-  int8_t tempSamples[20];
+  int8_t tempSamples[40];
   uint8_t validCount = 0;
   
-  for (uint8_t i = 0; i < 20; i++) {
+  for (uint8_t i = 0; i < 40; i++) {
     if (rssiSamples[i] > -100) {
       tempSamples[validCount++] = rssiSamples[i];
     }
@@ -126,30 +250,22 @@ int8_t processRSSIWithMedianFilter() {
   
   if (validCount == 0) return -100;
   
-  // ソートして中央値を取得
+  // ソート
   sortRSSISamples(tempSamples, validCount);
   
-  if (validCount >= 10) {
-    // 中央10個の平均を計算
-    uint8_t startIdx = (validCount - 10) / 2;
-    uint8_t endIdx = startIdx + 9;  // 10個
-    
-    int16_t sum = 0;
-    for (uint8_t i = startIdx; i <= endIdx; i++) {
-      sum += tempSamples[i];
-    }
-    return sum / 10;
-  } else if (validCount >= 3) {
-    // サンプル数が少ない場合は中央値
-    return tempSamples[validCount / 2];
+  // 標準偏差50に近い10個の平均を計算
+  float rawAverage = calculateStdDev50BasedAverage(tempSamples, validCount);
+  
+  // EMA適用
+  if (emaRSSI == -100.0f) {
+    // 初回はそのまま設定
+    emaRSSI = rawAverage;
   } else {
-    // サンプル数が非常に少ない場合は平均
-    int16_t sum = 0;
-    for (uint8_t i = 0; i < validCount; i++) {
-      sum += tempSamples[i];
-    }
-    return sum / validCount;
+    // EMA計算: new_value = α * current + (1-α) * previous
+    emaRSSI = EMA_ALPHA * rawAverage + (1.0f - EMA_ALPHA) * emaRSSI;
   }
+  
+  return (int8_t)round(emaRSSI);
 }
 
 // RSSIサンプル追加
@@ -161,9 +277,9 @@ void addRSSISample(int8_t newRSSI) {
   
   // サンプル追加
   rssiSamples[sampleIndex] = newRSSI;
-  sampleIndex = (sampleIndex + 1) % 20;
+  sampleIndex = (sampleIndex + 1) % 40;
   
-  if (validSampleCount < 20) {
+  if (validSampleCount < 40) {
     validSampleCount++;
   }
 }
@@ -191,11 +307,12 @@ void updateOutputParameters(int8_t rssi) {
   if (millis() - lastDebugTime > 2000) {  // 2秒間隔
     Serial.print("RSSI: ");
     Serial.print(rssi);
-    Serial.print(" dBm (Avg10), Level: ");
+    Serial.print(" dBm (EMA+StdDev50), Level: ");
     Serial.print(DISTANCE_LEVELS[level].description);
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
-    Serial.println("/20");
+    Serial.print("/40, EMA: ");
+    Serial.println(emaRSSI, 1);
     lastDebugTime = millis();
   }
 }
@@ -219,10 +336,10 @@ void setup() {
   }
 
   if (IS_CENTRAL) {
-    Serial.println("CENTRAL: Median Filter Enhanced Version");
+    Serial.println("CENTRAL: EMA + Min Variance Filter Enhanced Version");
     startScan();
   } else {
-    Serial.println("PERIPHERAL: Median Filter Enhanced Version");
+    Serial.println("PERIPHERAL: EMA + Min Variance Filter Enhanced Version");
     ledService.addCharacteristic(dummyChar);
     BLE.setAdvertisedService(ledService);
     BLE.addService(ledService);
@@ -231,7 +348,7 @@ void setup() {
   }
   
   Serial.println("BluetoothTest3 - Connection Fixed Version Started");
-  Serial.println("RSSI Sampling: 50ms interval, 20 samples, 500ms update, Middle 10 average");
+  Serial.println("RSSI: 25ms interval, 40 samples (1s), EMA(α=0.3) + StdDev≈50 10-value average");
   
   // 起動時テスト
   Serial.println("System test...");
@@ -255,11 +372,12 @@ void loop() {
         Serial.println("Connected!");
         
         // サンプルバッファをリセット
-        for (uint8_t i = 0; i < 20; i++) {
+        for (uint8_t i = 0; i < 40; i++) {
           rssiSamples[i] = -100;
         }
         sampleIndex = 0;
         validSampleCount = 0;
+        emaRSSI = -100.0f;  // EMAもリセット
       }
     }
     
@@ -276,8 +394,9 @@ void loop() {
       Serial.println("Disconnected");
       peer = BLEDevice();
       filteredRSSI = -100;  
+      emaRSSI = -100.0f;  // EMAもリセット
       // サンプルバッファリセット
-      for (uint8_t i = 0; i < 20; i++) {
+      for (uint8_t i = 0; i < 40; i++) {
         rssiSamples[i] = -100;
       }
       sampleIndex = 0;
@@ -302,7 +421,7 @@ void loop() {
 
   /* --------- RSSI処理と出力制御（500ms間隔で更新） --------- */
   if (connected && (now - lastOutputUpdate >= OUTPUT_UPDATE_INTERVAL)) {
-    filteredRSSI = processRSSIWithMedianFilter();
+    filteredRSSI = processRSSIWithEMAAndStdDev50();
     if (filteredRSSI > -100) {
       updateOutputParameters(filteredRSSI);
     }
