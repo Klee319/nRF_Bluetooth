@@ -42,11 +42,11 @@ bool     buzzerState = false;
 /* ----- RSSI処理（中央値フィルタ版） ----- */
 int8_t   lastRSSI   = -100;
 int8_t   filteredRSSI = -100;         
-int8_t   rssiSamples[10] = {-100, -100, -100, -100, -100, -100, -100, -100, -100, -100};  // 10サンプル
+int8_t   rssiSamples[20] = {-100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100};  // 20サンプル
 uint8_t  sampleIndex = 0;
 uint8_t  validSampleCount = 0;
 constexpr uint32_t RSSI_SAMPLE_INTERVAL = 50;    // RSSIサンプリング間隔(ms)
-constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 500;  // 出力更新間隔(ms) 
+constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 500;  // 出力更新間隔(ms)
 
 /* ----- 距離段階定義 ----- */
 struct DistanceLevel {
@@ -110,15 +110,15 @@ void sortRSSISamples(int8_t* arr, uint8_t size) {
   }
 }
 
-// 中央値フィルタによるRSSI処理
+// 中央値フィルタによるRSSI処理（中央10個の平均版）
 int8_t processRSSIWithMedianFilter() {
   if (validSampleCount == 0) return -100;
   
   // 有効なサンプルを一時配列にコピー
-  int8_t tempSamples[10];
+  int8_t tempSamples[20];
   uint8_t validCount = 0;
   
-  for (uint8_t i = 0; i < 10; i++) {
+  for (uint8_t i = 0; i < 20; i++) {
     if (rssiSamples[i] > -100) {
       tempSamples[validCount++] = rssiSamples[i];
     }
@@ -129,14 +129,26 @@ int8_t processRSSIWithMedianFilter() {
   // ソートして中央値を取得
   sortRSSISamples(tempSamples, validCount);
   
-  if (validCount % 2 == 1) {
-    // 奇数個の場合：中央の値
+  if (validCount >= 10) {
+    // 中央10個の平均を計算
+    uint8_t startIdx = (validCount - 10) / 2;
+    uint8_t endIdx = startIdx + 9;  // 10個
+    
+    int16_t sum = 0;
+    for (uint8_t i = startIdx; i <= endIdx; i++) {
+      sum += tempSamples[i];
+    }
+    return sum / 10;
+  } else if (validCount >= 3) {
+    // サンプル数が少ない場合は中央値
     return tempSamples[validCount / 2];
   } else {
-    // 偶数個の場合：中央2つの平均
-    uint8_t mid1 = validCount / 2 - 1;
-    uint8_t mid2 = validCount / 2;
-    return (tempSamples[mid1] + tempSamples[mid2]) / 2;
+    // サンプル数が非常に少ない場合は平均
+    int16_t sum = 0;
+    for (uint8_t i = 0; i < validCount; i++) {
+      sum += tempSamples[i];
+    }
+    return sum / validCount;
   }
 }
 
@@ -149,9 +161,9 @@ void addRSSISample(int8_t newRSSI) {
   
   // サンプル追加
   rssiSamples[sampleIndex] = newRSSI;
-  sampleIndex = (sampleIndex + 1) % 10;
+  sampleIndex = (sampleIndex + 1) % 20;
   
-  if (validSampleCount < 10) {
+  if (validSampleCount < 20) {
     validSampleCount++;
   }
 }
@@ -179,11 +191,11 @@ void updateOutputParameters(int8_t rssi) {
   if (millis() - lastDebugTime > 2000) {  // 2秒間隔
     Serial.print("RSSI: ");
     Serial.print(rssi);
-    Serial.print(" dBm (Median), Level: ");
+    Serial.print(" dBm (Avg10), Level: ");
     Serial.print(DISTANCE_LEVELS[level].description);
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
-    Serial.println("/10 [PERIPHERAL]");
+    Serial.println("/20 [PERIPHERAL]");
     lastDebugTime = millis();
   }
 }
@@ -219,6 +231,7 @@ void setup() {
   }
   
   Serial.println("BluetoothTest3 - Connection Fixed Version Started (Peripheral)");
+  Serial.println("RSSI Sampling: 50ms interval, 20 samples, 500ms update, Middle 10 average");
   
   // 起動時テスト
   Serial.println("System test...");
