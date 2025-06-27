@@ -48,7 +48,7 @@ uint8_t  sampleIndex = 0;
 uint8_t  validSampleCount = 0;
 constexpr uint32_t RSSI_SAMPLE_INTERVAL = 25;    // RSSIサンプリング間隔(ms) - 25msに変更
 constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 800;  // 出力更新間隔(ms)
-constexpr float EMA_ALPHA = 0.1f;                 // EMA平滑化係数
+constexpr float EMA_ALPHA = 0.3f;                 // EMA平滑化係数
 
 /* ----- 距離段階定義 ----- */
 struct DistanceLevel {
