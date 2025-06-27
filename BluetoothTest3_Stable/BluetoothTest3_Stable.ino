@@ -35,7 +35,8 @@ uint32_t lastOutputUpdate = 0;                // 出力更新用
 uint16_t blinkMs    = 1000;           
 uint16_t buzzerMs   = 0;              
 uint16_t buzzerFreq = 0;              
-uint8_t  buzzerVolume = 0;            
+uint8_t  buzzerVolume = 0;
+double   outputIntensity = 0.0;               // 連続的な出力強度 (0.0-100.0)            
 bool     ledState   = false;
 bool     buzzerState = false;
 
@@ -50,25 +51,13 @@ constexpr uint32_t RSSI_SAMPLE_INTERVAL = 25;    // RSSIサンプリング間隔
 constexpr uint32_t OUTPUT_UPDATE_INTERVAL = 800;  // 出力更新間隔(ms)
 constexpr float EMA_ALPHA = 0.3f;                 // EMA平滑化係数
 
-/* ----- 距離段階定義 ----- */
-struct DistanceLevel {
-  int8_t rssiThreshold;
-  uint16_t ledInterval;
-  uint16_t buzzerInterval;
-  uint16_t buzzerFrequency;           
-  uint8_t buzzerVolume;               
-  const char* description;
-};
+/* ----- 連続的出力強度計算用定数 ----- */
+constexpr int8_t  RSSI_MIN = -85;                 // 最弱信号 (遠距離)
+constexpr int8_t  RSSI_MAX = -35;                 // 最強信号 (極近距離)
+constexpr double  INTENSITY_MIN = 1.0;            // 最弱出力強度
+constexpr double  INTENSITY_MAX = 100.0;          // 最強出力強度
 
-constexpr DistanceLevel DISTANCE_LEVELS[] = {
-  {-35, 50,   100,  2000, 255, "極近距離"},    
-  {-45, 100,  200,  1500, 200, "近距離"},      
-  {-55, 200,  400,  1200, 150, "中近距離"},    
-  {-65, 400,  800,  1000, 100, "中距離"},      
-  {-75, 800,  1600, 800,  50,  "中遠距離"},    
-  {-85, 1200, 0,    0,    0,   "遠距離"},      
-};
-constexpr uint8_t NUM_LEVELS = sizeof(DISTANCE_LEVELS) / sizeof(DISTANCE_LEVELS[0]);
+
 
 /* ----- ユーティリティ関数 ----- */
 inline void ledOn()    { digitalWrite(LED_PIN, LED_ON_LVL);    }
@@ -97,6 +86,102 @@ inline void buzzerToggle() {
   } else {
     buzzerOff();                        
   }
+}
+
+/* ===== 連続的出力強度計算関数 ===== */
+/**
+ * RSSI値を0.0～100.0の連続的な出力強度に変換
+ * @param rssi RSSI値 (dBm)
+ * @return 出力強度 (0.0: 無効値, 1.0-100.0: 有効範囲)
+ */
+double getOutputIntensity(int8_t rssi) {
+  // 無効なRSSI値の場合
+  if (rssi <= -100 || rssi > -20) {
+    return 0.0;
+  }
+  
+  // RSSI範囲外をクランプ
+  if (rssi < RSSI_MIN) rssi = RSSI_MIN;
+  if (rssi > RSSI_MAX) rssi = RSSI_MAX;
+  
+  // 線形マッピング: RSSI_MIN(-85) → 1.0, RSSI_MAX(-35) → 100.0
+  double normalizedRSSI = (double)(rssi - RSSI_MIN) / (double)(RSSI_MAX - RSSI_MIN);
+  double intensity = INTENSITY_MIN + normalizedRSSI * (INTENSITY_MAX - INTENSITY_MIN);
+  
+  return intensity;
+}
+
+/* ===== 連続的LED制御関数 ===== */
+/**
+ * 出力強度に基づいてLEDの点滅間隔を計算
+ * @param intensity 出力強度 (1.0-100.0)
+ * @return 点滅間隔 (ms)
+ */
+uint16_t calculateLEDInterval(double intensity) {
+  if (intensity <= 0.0) return 1000;  // 未接続時の標準点滅
+  
+  // 強度1.0 → 1200ms, 強度100.0 → 50ms の指数関数的変化
+  // interval = 1200 * exp(-0.035 * (intensity - 1))
+  double exponent = -0.035 * (intensity - 1.0);
+  double interval = 1200.0 * exp(exponent);
+  
+  // 最小・最大値制限
+  if (interval < 50.0) interval = 50.0;
+  if (interval > 1200.0) interval = 1200.0;
+  
+  return (uint16_t)interval;
+}
+
+/* ===== 連続的ブザー制御関数 ===== */
+/**
+ * 出力強度に基づいてブザーの周波数を計算
+ * @param intensity 出力強度 (1.0-100.0)
+ * @return ブザー周波数 (Hz), 0なら無音
+ */
+uint16_t calculateBuzzerFrequency(double intensity) {
+  if (intensity <= 1.0) return 0;  // 遠距離では無音
+  
+  // 強度1.0 → 800Hz, 強度100.0 → 2000Hz の線形変化
+  double frequency = 800.0 + (intensity - 1.0) * (2000.0 - 800.0) / (100.0 - 1.0);
+  
+  return (uint16_t)frequency;
+}
+
+/**
+ * 出力強度に基づいてブザーの点滅間隔を計算
+ * @param intensity 出力強度 (1.0-100.0)
+ * @return 点滅間隔 (ms), 0なら連続音
+ */
+uint16_t calculateBuzzerInterval(double intensity) {
+  if (intensity <= 1.0) return 0;  // 遠距離では無音
+  
+  // 強度1.0 → 1600ms, 強度100.0 → 100ms の指数関数的変化
+  double exponent = -0.025 * (intensity - 1.0);
+  double interval = 1600.0 * exp(exponent);
+  
+  // 最小・最大値制限
+  if (interval < 100.0) interval = 100.0;
+  if (interval > 1600.0) interval = 1600.0;
+  
+  return (uint16_t)interval;
+}
+
+/**
+ * 出力強度に基づいてブザーの音量を計算
+ * @param intensity 出力強度 (1.0-100.0)
+ * @return 音量 (0-255)
+ */
+uint8_t calculateBuzzerVolume(double intensity) {
+  if (intensity <= 1.0) return 0;  // 遠距離では無音
+  
+  // 強度1.0 → 50, 強度100.0 → 255 の線形変化
+  double volume = 50.0 + (intensity - 1.0) * (255.0 - 50.0) / (100.0 - 1.0);
+  
+  // 範囲制限
+  if (volume < 0.0) volume = 0.0;
+  if (volume > 255.0) volume = 255.0;
+  
+  return (uint8_t)volume;
 }
 
 // 中央値計算用ソート関数（バブルソート）
@@ -284,31 +369,40 @@ void addRSSISample(int8_t newRSSI) {
   }
 }
 
-// 距離レベルの判定
-uint8_t getDistanceLevel(int8_t rssi) {
-  for (uint8_t i = 0; i < NUM_LEVELS; i++) {
-    if (rssi >= DISTANCE_LEVELS[i].rssiThreshold) {
-      return i;
-    }
-  }
-  return NUM_LEVELS - 1;  
-}
-
-// 出力パラメータの更新
+// 出力パラメータの更新（連続的制御版）
 void updateOutputParameters(int8_t rssi) {
-  uint8_t level = getDistanceLevel(rssi);
-  blinkMs = DISTANCE_LEVELS[level].ledInterval;
-  buzzerMs = DISTANCE_LEVELS[level].buzzerInterval;
-  buzzerFreq = DISTANCE_LEVELS[level].buzzerFrequency;    
-  buzzerVolume = DISTANCE_LEVELS[level].buzzerVolume;     
+  // 連続的な出力強度を計算
+  outputIntensity = getOutputIntensity(rssi);
+  
+  if (outputIntensity > 0.0) {
+    // 連続的制御パラメータを計算
+    blinkMs = calculateLEDInterval(outputIntensity);
+    buzzerMs = calculateBuzzerInterval(outputIntensity);
+    buzzerFreq = calculateBuzzerFrequency(outputIntensity);    
+    buzzerVolume = calculateBuzzerVolume(outputIntensity);
+  } else {
+    // 無効値の場合は無効状態
+    blinkMs = 1000;
+    buzzerMs = 0;
+    buzzerFreq = 0;
+    buzzerVolume = 0;
+  }
   
   // デバッグ出力（頻度制限）
   static uint32_t lastDebugTime = 0;
   if (millis() - lastDebugTime > 2000) {  // 2秒間隔
     Serial.print("RSSI: ");
     Serial.print(rssi);
-    Serial.print(" dBm (EMA+StdDev50), Level: ");
-    Serial.print(DISTANCE_LEVELS[level].description);
+    Serial.print(" dBm (EMA+StdDev50), Intensity: ");
+    Serial.print(outputIntensity, 1);
+    Serial.print(", LED: ");
+    Serial.print(blinkMs);
+    Serial.print("ms, Buzz: ");
+    Serial.print(buzzerFreq);
+    Serial.print("Hz/");
+    Serial.print(buzzerMs);
+    Serial.print("ms/Vol");
+    Serial.print(buzzerVolume);
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
     Serial.print("/40, EMA: ");
@@ -427,6 +521,7 @@ void loop() {
     }
     lastOutputUpdate = now;
   } else if (!connected) {
+    outputIntensity = 0.0;                   // 未接続時は強度0
     blinkMs = 1000;                          
     buzzerMs = 0;                            
     buzzerFreq = 0;                          
