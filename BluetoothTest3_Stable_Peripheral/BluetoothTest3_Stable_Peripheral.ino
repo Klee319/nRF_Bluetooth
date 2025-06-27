@@ -27,21 +27,13 @@ BLEByteCharacteristic dummyChar("19B10001-E8F2-537E-4F6C-D104768A1214",
 /* ----- Central 用 ----- */
 BLEDevice peer;
 
-/* ----- 出力制御用変数 ----- */
+/* ----- 最小限の状態管理変数 ----- */
 uint32_t lastToggle = 0;
 uint32_t lastBuzzer = 0;
 uint32_t lastRSSISample = 0;                  // RSSIサンプリング用
 uint32_t lastOutputUpdate = 0;                // 出力更新用
-uint16_t blinkMs    = 1000;           
-uint16_t buzzerMs   = 0;              
-uint16_t buzzerFreq = 0;              
-uint8_t  buzzerVolume = 0;
-double   outputIntensity = 0.0;               // 連続的な出力強度 (0.0-100.0)            
-bool     ledState   = false;
-bool     buzzerState = false;
 
 /* ----- RSSI処理（EMA + 標準偏差50近似フィルタ版） ----- */
-int8_t   lastRSSI   = -100;
 int8_t   filteredRSSI = -100;         
 float    emaRSSI = -100.0f;           // EMA用の浮動小数点値
 int8_t   rssiSamples[40] = {-100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100, -100};  // 40サンプル
@@ -75,14 +67,23 @@ inline void buzzerOff() {
 }
 
 inline void ledToggle() { 
-  ledState = !ledState; 
-  digitalWrite(LED_PIN, ledState ? LED_ON_LVL : LED_OFF_LVL); 
+  // 現在の状態を読み取って反転
+  bool currentState = (digitalRead(LED_PIN) == LED_ON_LVL);
+  digitalWrite(LED_PIN, currentState ? LED_OFF_LVL : LED_ON_LVL); 
 }
 
 inline void buzzerToggle() {
+  // ブザーの現在の状態を判定（トーン出力中かどうか）
+  static bool buzzerState = false;
   buzzerState = !buzzerState;
-  if (buzzerState && buzzerFreq > 0) {
-    buzzerOn(buzzerFreq, buzzerVolume); 
+  
+  // リアルタイム計算（関数宣言順序の問題を回避）
+  double intensity = getOutputIntensity(filteredRSSI);
+  uint16_t freq = calculateBuzzerFrequency(intensity);
+  uint8_t volume = calculateBuzzerVolume(intensity);
+  
+  if (buzzerState && freq > 0) {
+    buzzerOn(freq, volume); 
   } else {
     buzzerOff();                        
   }
@@ -182,6 +183,59 @@ uint8_t calculateBuzzerVolume(double intensity) {
   if (volume > 255.0) volume = 255.0;
   
   return (uint8_t)volume;
+}
+
+/* ===== リアルタイム出力制御関数 ===== */
+/**
+ * 現在のRSSIに基づいてLED点滅間隔を取得
+ * @param coefficient 調整係数 (デフォルト1.0)
+ * @return LED点滅間隔 (ms)
+ */
+uint16_t getCurrentLEDInterval(double coefficient = 1.0) {
+  double intensity = getOutputIntensity(filteredRSSI);
+  if (intensity <= 0.0) return 1000;  // 未接続時
+  return (uint16_t)(calculateLEDInterval(intensity) * coefficient);
+}
+
+/**
+ * 現在のRSSIに基づいてブザー周波数を取得
+ * @param coefficient 調整係数 (デフォルト1.0)
+ * @return ブザー周波数 (Hz)
+ */
+uint16_t getCurrentBuzzerFrequency(double coefficient = 1.0) {
+  double intensity = getOutputIntensity(filteredRSSI);
+  uint16_t freq = calculateBuzzerFrequency(intensity);
+  return (uint16_t)(freq * coefficient);
+}
+
+/**
+ * 現在のRSSIに基づいてブザー点滅間隔を取得
+ * @param coefficient 調整係数 (デフォルト1.0)
+ * @return ブザー点滅間隔 (ms)
+ */
+uint16_t getCurrentBuzzerInterval(double coefficient = 1.0) {
+  double intensity = getOutputIntensity(filteredRSSI);
+  if (intensity <= 1.0) return 0;  // 遠距離では無音
+  return (uint16_t)(calculateBuzzerInterval(intensity) * coefficient);
+}
+
+/**
+ * 現在のRSSIに基づいてブザー音量を取得
+ * @param coefficient 調整係数 (デフォルト1.0)
+ * @return ブザー音量 (0-255)
+ */
+uint8_t getCurrentBuzzerVolume(double coefficient = 1.0) {
+  double intensity = getOutputIntensity(filteredRSSI);
+  uint8_t volume = calculateBuzzerVolume(intensity);
+  return (uint8_t)(volume * coefficient > 255 ? 255 : volume * coefficient);
+}
+
+/**
+ * 現在の出力強度を取得
+ * @return 出力強度 (0.0-100.0)
+ */
+double getCurrentOutputIntensity() {
+  return getOutputIntensity(filteredRSSI);
 }
 
 // 中央値計算用ソート関数（バブルソート）
@@ -369,40 +423,23 @@ void addRSSISample(int8_t newRSSI) {
   }
 }
 
-// 出力パラメータの更新（連続的制御版）
-void updateOutputParameters(int8_t rssi) {
-  // 連続的な出力強度を計算
-  outputIntensity = getOutputIntensity(rssi);
-  
-  if (outputIntensity > 0.0) {
-    // 連続的制御パラメータを計算
-    blinkMs = calculateLEDInterval(outputIntensity);
-    buzzerMs = calculateBuzzerInterval(outputIntensity);
-    buzzerFreq = calculateBuzzerFrequency(outputIntensity);    
-    buzzerVolume = calculateBuzzerVolume(outputIntensity);
-  } else {
-    // 無効値の場合は無効状態
-    blinkMs = 1000;
-    buzzerMs = 0;
-    buzzerFreq = 0;
-    buzzerVolume = 0;
-  }
-  
-  // デバッグ出力（頻度制限）
+// デバッグ出力（リアルタイム計算版）
+void printDebugInfo(int8_t rssi) {
   static uint32_t lastDebugTime = 0;
   if (millis() - lastDebugTime > 2000) {  // 2秒間隔
+    double intensity = getCurrentOutputIntensity();
     Serial.print("RSSI: ");
     Serial.print(rssi);
     Serial.print(" dBm (EMA+StdDev50), Intensity: ");
-    Serial.print(outputIntensity, 1);
+    Serial.print(intensity, 1);
     Serial.print(", LED: ");
-    Serial.print(blinkMs);
+    Serial.print(getCurrentLEDInterval());
     Serial.print("ms, Buzz: ");
-    Serial.print(buzzerFreq);
+    Serial.print(getCurrentBuzzerFrequency());
     Serial.print("Hz/");
-    Serial.print(buzzerMs);
+    Serial.print(getCurrentBuzzerInterval());
     Serial.print("ms/Vol");
-    Serial.print(buzzerVolume);
+    Serial.print(getCurrentBuzzerVolume());
     Serial.print(", Samples: ");
     Serial.print(validSampleCount);
     Serial.print("/40, EMA: ");
@@ -476,37 +513,37 @@ void loop() {
     }
   }
 
-  /* --------- RSSI処理と出力制御（500ms間隔で更新） --------- */
+  /* --------- RSSI処理とデバッグ出力（800ms間隔で更新） --------- */
   if (connected && (now - lastOutputUpdate >= OUTPUT_UPDATE_INTERVAL)) {
     filteredRSSI = processRSSIWithEMAAndStdDev50();
     if (filteredRSSI > -100) {
-      updateOutputParameters(filteredRSSI);
+      printDebugInfo(filteredRSSI);
     }
     lastOutputUpdate = now;
   } else if (!connected) {
-    outputIntensity = 0.0;                   // 未接続時は強度0
-    blinkMs = 1000;                          
-    buzzerMs = 0;                            
-    buzzerFreq = 0;                          
-    buzzerVolume = 0;                        
-    emaRSSI = -100.0f;  // 接続断時にEMAもリセット
+    filteredRSSI = -100;                     // 未接続時は無効値
   }
 
-  /* --------- LED制御 --------- */
-  if (now - lastToggle >= blinkMs) {
+  /* --------- LED制御（リアルタイム計算） --------- */
+  // 例: LED速度を1.5倍にしたい場合 → getCurrentLEDInterval(0.67)
+  uint16_t currentLEDInterval = getCurrentLEDInterval(1.0);  // 係数 1.0 = 標準速度
+  if (now - lastToggle >= currentLEDInterval) {
     ledToggle();
     lastToggle = now;
   }
 
-  /* --------- ブザー制御 --------- */
-  if (buzzerMs > 0 && buzzerFreq > 0) {      
-    if (now - lastBuzzer >= buzzerMs) {
+  /* --------- ブザー制御（リアルタイム計算） --------- */
+  // 例: ブザー音量を80%にしたい場合 → getCurrentBuzzerVolume(0.8)
+  // 例: ブザー周波数を1.2倍にしたい場合 → getCurrentBuzzerFrequency(1.2)
+  uint16_t currentBuzzerInterval = getCurrentBuzzerInterval(1.0);  // 係数 1.0 = 標準間隔
+  uint16_t currentBuzzerFreq = getCurrentBuzzerFrequency(1.0);     // 係数 1.0 = 標準周波数
+  if (currentBuzzerInterval > 0 && currentBuzzerFreq > 0) {      
+    if (now - lastBuzzer >= currentBuzzerInterval) {
       buzzerToggle();
       lastBuzzer = now;
     }
   } else {
     buzzerOff();                             
-    buzzerState = false;
   }
 
   BLE.poll();
